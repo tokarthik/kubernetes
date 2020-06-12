@@ -21,16 +21,22 @@ import (
 	"time"
 
 	cadvisorapi "github.com/google/cadvisor/info/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/flowcontrol"
+	"k8s.io/component-base/logs/logreduction"
+	internalapi "k8s.io/cri-api/pkg/apis"
 	"k8s.io/kubernetes/pkg/credentialprovider"
-	internalapi "k8s.io/kubernetes/pkg/kubelet/apis/cri"
 	"k8s.io/kubernetes/pkg/kubelet/cm"
 	kubecontainer "k8s.io/kubernetes/pkg/kubelet/container"
 	"k8s.io/kubernetes/pkg/kubelet/images"
 	"k8s.io/kubernetes/pkg/kubelet/lifecycle"
 	proberesults "k8s.io/kubernetes/pkg/kubelet/prober/results"
+)
+
+const (
+	fakeSeccompProfileRoot = "/fakeSeccompProfileRoot"
 )
 
 type fakeHTTP struct {
@@ -43,35 +49,45 @@ func (f *fakeHTTP) Get(url string) (*http.Response, error) {
 	return nil, f.err
 }
 
-type fakePodDeletionProvider struct {
-	pods map[types.UID]struct{}
+type fakePodStateProvider struct {
+	existingPods map[types.UID]struct{}
+	runningPods  map[types.UID]struct{}
 }
 
-func newFakePodDeletionProvider() *fakePodDeletionProvider {
-	return &fakePodDeletionProvider{
-		pods: make(map[types.UID]struct{}),
+func newFakePodStateProvider() *fakePodStateProvider {
+	return &fakePodStateProvider{
+		existingPods: make(map[types.UID]struct{}),
+		runningPods:  make(map[types.UID]struct{}),
 	}
 }
 
-func (f *fakePodDeletionProvider) IsPodDeleted(uid types.UID) bool {
-	_, found := f.pods[uid]
+func (f *fakePodStateProvider) IsPodDeleted(uid types.UID) bool {
+	_, found := f.existingPods[uid]
 	return !found
 }
 
-func NewFakeKubeRuntimeManager(runtimeService internalapi.RuntimeService, imageService internalapi.ImageManagerService, machineInfo *cadvisorapi.MachineInfo, osInterface kubecontainer.OSInterface, runtimeHelper kubecontainer.RuntimeHelper, keyring credentialprovider.DockerKeyring) (*kubeGenericRuntimeManager, error) {
+func (f *fakePodStateProvider) IsPodTerminated(uid types.UID) bool {
+	_, found := f.runningPods[uid]
+	return !found
+}
+
+func newFakeKubeRuntimeManager(runtimeService internalapi.RuntimeService, imageService internalapi.ImageManagerService, machineInfo *cadvisorapi.MachineInfo, osInterface kubecontainer.OSInterface, runtimeHelper kubecontainer.RuntimeHelper, keyring credentialprovider.DockerKeyring) (*kubeGenericRuntimeManager, error) {
 	recorder := &record.FakeRecorder{}
 	kubeRuntimeManager := &kubeGenericRuntimeManager{
-		recorder:            recorder,
-		cpuCFSQuota:         false,
-		livenessManager:     proberesults.NewManager(),
-		containerRefManager: kubecontainer.NewRefManager(),
-		machineInfo:         machineInfo,
-		osInterface:         osInterface,
-		runtimeHelper:       runtimeHelper,
-		runtimeService:      runtimeService,
-		imageService:        imageService,
-		keyring:             keyring,
-		internalLifecycle:   cm.NewFakeInternalContainerLifecycle(),
+		recorder:           recorder,
+		cpuCFSQuota:        false,
+		cpuCFSQuotaPeriod:  metav1.Duration{Duration: time.Microsecond * 100},
+		livenessManager:    proberesults.NewManager(),
+		startupManager:     proberesults.NewManager(),
+		machineInfo:        machineInfo,
+		osInterface:        osInterface,
+		runtimeHelper:      runtimeHelper,
+		runtimeService:     runtimeService,
+		imageService:       imageService,
+		keyring:            keyring,
+		seccompProfileRoot: fakeSeccompProfileRoot,
+		internalLifecycle:  cm.NewFakeInternalContainerLifecycle(),
+		logReduction:       logreduction.NewLogReduction(identicalErrorDelay),
 	}
 
 	typedVersion, err := runtimeService.Version(kubeRuntimeAPIVersion)
@@ -79,7 +95,7 @@ func NewFakeKubeRuntimeManager(runtimeService internalapi.RuntimeService, imageS
 		return nil, err
 	}
 
-	kubeRuntimeManager.containerGC = NewContainerGC(runtimeService, newFakePodDeletionProvider(), kubeRuntimeManager)
+	kubeRuntimeManager.containerGC = newContainerGC(runtimeService, newFakePodStateProvider(), kubeRuntimeManager)
 	kubeRuntimeManager.runtimeName = typedVersion.RuntimeName
 	kubeRuntimeManager.imagePuller = images.NewImageManager(
 		kubecontainer.FilterEventRecorder(recorder),

@@ -18,8 +18,10 @@ package util
 
 import (
 	"fmt"
+	"net"
+	"strconv"
 
-	"github.com/golang/glog"
+	"k8s.io/klog/v2"
 )
 
 // LocalPort describes a port on specific IP address and protocol
@@ -37,10 +39,11 @@ type LocalPort struct {
 }
 
 func (lp *LocalPort) String() string {
-	return fmt.Sprintf("%q (%s:%d/%s)", lp.Description, lp.IP, lp.Port, lp.Protocol)
+	ipPort := net.JoinHostPort(lp.IP, strconv.Itoa(lp.Port))
+	return fmt.Sprintf("%q (%s/%s)", lp.Description, ipPort, lp.Protocol)
 }
 
-// Closeable is an interface around closing an port.
+// Closeable is an interface around closing a port.
 type Closeable interface {
 	Close() error
 }
@@ -48,7 +51,7 @@ type Closeable interface {
 // PortOpener is an interface around port opening/closing.
 // Abstracted out for testing.
 type PortOpener interface {
-	OpenLocalPort(lp *LocalPort) (Closeable, error)
+	OpenLocalPort(lp *LocalPort, isIPv6 bool) (Closeable, error)
 }
 
 // RevertPorts is closing ports in replacementPortsMap but not in originalPortsMap. In other words, it only
@@ -57,7 +60,7 @@ func RevertPorts(replacementPortsMap, originalPortsMap map[LocalPort]Closeable) 
 	for k, v := range replacementPortsMap {
 		// Only close newly opened local ports - leave ones that were open before this update
 		if originalPortsMap[k] == nil {
-			glog.V(2).Infof("Closing local port %s", k.String())
+			klog.V(2).Infof("Closing local port %s", k.String())
 			v.Close()
 		}
 	}

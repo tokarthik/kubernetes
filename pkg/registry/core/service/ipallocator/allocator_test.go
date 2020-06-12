@@ -21,92 +21,134 @@ import (
 	"testing"
 
 	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/kubernetes/pkg/api"
+	api "k8s.io/kubernetes/pkg/apis/core"
 )
 
 func TestAllocate(t *testing.T) {
-	_, cidr, err := net.ParseCIDR("192.168.1.0/24")
-	if err != nil {
-		t.Fatal(err)
+	testCases := []struct {
+		name             string
+		cidr             string
+		free             int
+		released         string
+		outOfRange1      string
+		outOfRange2      string
+		outOfRange3      string
+		alreadyAllocated string
+	}{
+		{
+			name:             "IPv4",
+			cidr:             "192.168.1.0/24",
+			free:             254,
+			released:         "192.168.1.5",
+			outOfRange1:      "192.168.0.1",
+			outOfRange2:      "192.168.1.0",
+			outOfRange3:      "192.168.1.255",
+			alreadyAllocated: "192.168.1.1",
+		},
+		{
+			name:             "IPv6",
+			cidr:             "2001:db8:1::/48",
+			free:             65534,
+			released:         "2001:db8:1::5",
+			outOfRange1:      "2001:db8::1",
+			outOfRange2:      "2001:db8:1::",
+			outOfRange3:      "2001:db8:1::ffff",
+			alreadyAllocated: "2001:db8:1::1",
+		},
 	}
-	r := NewCIDRRange(cidr)
-	t.Logf("base: %v", r.base.Bytes())
-	if f := r.Free(); f != 254 {
-		t.Errorf("unexpected free %d", f)
-	}
-	if f := r.Used(); f != 0 {
-		t.Errorf("unexpected used %d", f)
-	}
-	found := sets.NewString()
-	count := 0
-	for r.Free() > 0 {
+	for _, tc := range testCases {
+		_, cidr, err := net.ParseCIDR(tc.cidr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r, err := NewCIDRRange(cidr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("base: %v", r.base.Bytes())
+		if f := r.Free(); f != tc.free {
+			t.Errorf("Test %s unexpected free %d", tc.name, f)
+		}
+
+		rCIDR := r.CIDR()
+		if rCIDR.String() != tc.cidr {
+			t.Errorf("allocator returned a different cidr")
+		}
+
+		if f := r.Used(); f != 0 {
+			t.Errorf("Test %s unexpected used %d", tc.name, f)
+		}
+		found := sets.NewString()
+		count := 0
+		for r.Free() > 0 {
+			ip, err := r.AllocateNext()
+			if err != nil {
+				t.Fatalf("Test %s error @ %d: %v", tc.name, count, err)
+			}
+			count++
+			if !cidr.Contains(ip) {
+				t.Fatalf("Test %s allocated %s which is outside of %s", tc.name, ip, cidr)
+			}
+			if found.Has(ip.String()) {
+				t.Fatalf("Test %s allocated %s twice @ %d", tc.name, ip, count)
+			}
+			found.Insert(ip.String())
+		}
+		if _, err := r.AllocateNext(); err != ErrFull {
+			t.Fatal(err)
+		}
+
+		released := net.ParseIP(tc.released)
+		if err := r.Release(released); err != nil {
+			t.Fatal(err)
+		}
+		if f := r.Free(); f != 1 {
+			t.Errorf("Test %s unexpected free %d", tc.name, f)
+		}
+		if f := r.Used(); f != (tc.free - 1) {
+			t.Errorf("Test %s unexpected free %d", tc.name, f)
+		}
 		ip, err := r.AllocateNext()
 		if err != nil {
-			t.Fatalf("error @ %d: %v", count, err)
+			t.Fatal(err)
 		}
-		count++
-		if !cidr.Contains(ip) {
-			t.Fatalf("allocated %s which is outside of %s", ip, cidr)
+		if !released.Equal(ip) {
+			t.Errorf("Test %s unexpected %s : %s", tc.name, ip, released)
 		}
-		if found.Has(ip.String()) {
-			t.Fatalf("allocated %s twice @ %d", ip, count)
-		}
-		found.Insert(ip.String())
-	}
-	if _, err := r.AllocateNext(); err != ErrFull {
-		t.Fatal(err)
-	}
 
-	released := net.ParseIP("192.168.1.5")
-	if err := r.Release(released); err != nil {
-		t.Fatal(err)
-	}
-	if f := r.Free(); f != 1 {
-		t.Errorf("unexpected free %d", f)
-	}
-	if f := r.Used(); f != 253 {
-		t.Errorf("unexpected free %d", f)
-	}
-	ip, err := r.AllocateNext()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !released.Equal(ip) {
-		t.Errorf("unexpected %s : %s", ip, released)
-	}
-
-	if err := r.Release(released); err != nil {
-		t.Fatal(err)
-	}
-	err = r.Allocate(net.ParseIP("192.168.0.1"))
-	if _, ok := err.(*ErrNotInRange); !ok {
-		t.Fatal(err)
-	}
-	if err := r.Allocate(net.ParseIP("192.168.1.1")); err != ErrAllocated {
-		t.Fatal(err)
-	}
-	err = r.Allocate(net.ParseIP("192.168.1.0"))
-	if _, ok := err.(*ErrNotInRange); !ok {
-		t.Fatal(err)
-	}
-	err = r.Allocate(net.ParseIP("192.168.1.255"))
-	if _, ok := err.(*ErrNotInRange); !ok {
-		t.Fatal(err)
-	}
-	if f := r.Free(); f != 1 {
-		t.Errorf("unexpected free %d", f)
-	}
-	if f := r.Used(); f != 253 {
-		t.Errorf("unexpected free %d", f)
-	}
-	if err := r.Allocate(released); err != nil {
-		t.Fatal(err)
-	}
-	if f := r.Free(); f != 0 {
-		t.Errorf("unexpected free %d", f)
-	}
-	if f := r.Used(); f != 254 {
-		t.Errorf("unexpected free %d", f)
+		if err := r.Release(released); err != nil {
+			t.Fatal(err)
+		}
+		err = r.Allocate(net.ParseIP(tc.outOfRange1))
+		if _, ok := err.(*ErrNotInRange); !ok {
+			t.Fatal(err)
+		}
+		if err := r.Allocate(net.ParseIP(tc.alreadyAllocated)); err != ErrAllocated {
+			t.Fatal(err)
+		}
+		err = r.Allocate(net.ParseIP(tc.outOfRange2))
+		if _, ok := err.(*ErrNotInRange); !ok {
+			t.Fatal(err)
+		}
+		err = r.Allocate(net.ParseIP(tc.outOfRange3))
+		if _, ok := err.(*ErrNotInRange); !ok {
+			t.Fatal(err)
+		}
+		if f := r.Free(); f != 1 {
+			t.Errorf("Test %s unexpected free %d", tc.name, f)
+		}
+		if f := r.Used(); f != (tc.free - 1) {
+			t.Errorf("Test %s unexpected free %d", tc.name, f)
+		}
+		if err := r.Allocate(released); err != nil {
+			t.Fatal(err)
+		}
+		if f := r.Free(); f != 0 {
+			t.Errorf("Test %s unexpected free %d", tc.name, f)
+		}
+		if f := r.Used(); f != tc.free {
+			t.Errorf("Test %s unexpected free %d", tc.name, f)
+		}
 	}
 }
 
@@ -115,7 +157,10 @@ func TestAllocateTiny(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := NewCIDRRange(cidr)
+	r, err := NewCIDRRange(cidr)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if f := r.Free(); f != 0 {
 		t.Errorf("free: %d", f)
 	}
@@ -129,7 +174,10 @@ func TestAllocateSmall(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := NewCIDRRange(cidr)
+	r, err := NewCIDRRange(cidr)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if f := r.Free(); f != 2 {
 		t.Errorf("free: %d", f)
 	}
@@ -166,18 +214,46 @@ func TestAllocateSmall(t *testing.T) {
 }
 
 func TestRangeSize(t *testing.T) {
-	testCases := map[string]int64{
-		"192.168.1.0/24": 256,
-		"192.168.1.0/32": 1,
-		"192.168.1.0/31": 2,
+	testCases := []struct {
+		name  string
+		cidr  string
+		addrs int64
+	}{
+		{
+			name:  "supported IPv4 cidr",
+			cidr:  "192.168.1.0/24",
+			addrs: 256,
+		},
+		{
+			name:  "supported large IPv4 cidr",
+			cidr:  "10.96.0.0/12",
+			addrs: 1048576,
+		},
+		{
+			name:  "unsupported IPv4 cidr",
+			cidr:  "192.168.1.0/1",
+			addrs: 0,
+		},
+		{
+			name:  "supported IPv6 cidr",
+			cidr:  "2001:db8::/48",
+			addrs: 65536,
+		},
+		{
+			name:  "unsupported IPv6 mask",
+			cidr:  "2001:db8::/1",
+			addrs: 0,
+		},
 	}
-	for k, v := range testCases {
-		_, cidr, err := net.ParseCIDR(k)
+
+	for _, tc := range testCases {
+		_, cidr, err := net.ParseCIDR(tc.cidr)
 		if err != nil {
-			t.Fatal(err)
+			t.Errorf("failed to parse cidr for test %s, unexpected error: '%s'", tc.name, err)
 		}
-		if size := RangeSize(cidr); size != v {
-			t.Errorf("%s should have a range size of %d, got %d", k, v, size)
+		if size := RangeSize(cidr); size != tc.addrs {
+			t.Errorf("test %s failed. %s should have a range size of %d, got %d",
+				tc.name, tc.cidr, tc.addrs, size)
 		}
 	}
 }
@@ -196,7 +272,10 @@ func TestForEach(t *testing.T) {
 	}
 
 	for i, tc := range testCases {
-		r := NewCIDRRange(cidr)
+		r, err := NewCIDRRange(cidr)
+		if err != nil {
+			t.Fatal(err)
+		}
 		for ips := range tc {
 			ip := net.ParseIP(ips)
 			if err := r.Allocate(ip); err != nil {
@@ -224,7 +303,10 @@ func TestSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := NewCIDRRange(cidr)
+	r, err := NewCIDRRange(cidr)
+	if err != nil {
+		t.Fatal(err)
+	}
 	ip := []net.IP{}
 	for i := 0; i < 10; i++ {
 		n, err := r.AllocateNext()
@@ -253,11 +335,17 @@ func TestSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	other := NewCIDRRange(otherCidr)
+	other, err := NewCIDRRange(otherCidr)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := r.Restore(otherCidr, dst.Data); err != ErrMismatchedNetwork {
 		t.Fatal(err)
 	}
-	other = NewCIDRRange(network)
+	other, err = NewCIDRRange(network)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := other.Restore(network, dst.Data); err != nil {
 		t.Fatal(err)
 	}
@@ -277,7 +365,10 @@ func TestNewFromSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := NewCIDRRange(cidr)
+	r, err := NewCIDRRange(cidr)
+	if err != nil {
+		t.Fatal(err)
+	}
 	allocated := []net.IP{}
 	for i := 0; i < 128; i++ {
 		ip, err := r.AllocateNext()

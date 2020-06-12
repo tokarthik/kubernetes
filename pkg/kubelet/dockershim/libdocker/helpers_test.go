@@ -1,3 +1,5 @@
+// +build !dockerless
+
 /*
 Copyright 2014 The Kubernetes Authors.
 
@@ -102,7 +104,15 @@ func TestMatchImageTagOrSHA(t *testing.T) {
 			Output: true,
 		},
 		{
-			// RepoDigest match is is required
+			Inspected: dockertypes.ImageInspect{
+				ID:       "sha256:9bbdf247c91345f0789c10f50a57e36a667af1189687ad1de88a6243d05a2227",
+				RepoTags: []string{"docker.io/busybox:latest"},
+			},
+			Image:  "docker.io/library/busybox:latest",
+			Output: true,
+		},
+		{
+			// RepoDigest match is required
 			Inspected: dockertypes.ImageInspect{
 				ID:          "",
 				RepoDigests: []string{"docker.io/centos/ruby-23-centos7@sha256:000084acbbfb0347272112d2eb95574625c0c60b4e2fdadb139de5859cf754bf"},
